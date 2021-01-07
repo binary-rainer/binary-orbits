@@ -1,11 +1,16 @@
+# coding=latin1
 """
 Python class for fitting Kepler orbits to astrometric data
 
-Last Change: Sat Oct 19 00:00:44 2019
+Last Change: Thu Jan  7 16:39:06 2021
+
+2021-Jan-07: added fromObslist creator that reads observations from file
 """
 
+import re
 import numpy as np
 import matplotlib.pyplot as plt
+from datetime import datetime
 from astropy.time import Time
 from astropy.io  import fits
 from KeplerOrbit import KeplerOrbit
@@ -41,10 +46,73 @@ class OrbitFit:
         self.exobs= np.sqrt( dx1*dx1 + dx2*dx2 )
         self.eyobs= np.sqrt( dy1*dy1 + dy2*dy2 )
 
+        self.starname= ""
         self.orbit= None
 
     # end of __init__
 
+    @classmethod
+    def fromObslist(cls,fname):
+
+        f_in= open(fname, encoding='latin1')
+
+        for line in f_in:
+            if (line != '\n'): break
+
+        starname = line
+        print("Star name: ",starname)
+
+        cnt = 0
+        datalines = []
+
+        for line in f_in:
+            if (line == '\n'): continue
+            print(">>",line,end='')
+
+            # find lines start with dates
+            #                _Date_____________   _Sep_______           _eSep______    _PA________            _ePA_______   Ref_
+            m = re.match('\s*(\d+\.\w\w\w\.\d+)\s+(\d+\.?\d*)\s*\+/?-\s*(\d+\.?\d*)\s+(-?\d+\.?\d*)\s*\+/?-\s*(\d+\.?\d*)\s+(.*)$',
+                         str(line))
+
+            if m:
+                obstime = Time( datetime.strptime( m.group(1), "%d.%b.%Y"))
+            else:
+                #                _Date_____   _Sep_______           _eSep______    _PA________            _ePA_______   Ref_
+                m = re.match('\s*(\d+\.\d*)\s+(\d+\.?\d*)\s*\+/?-\s*(\d+\.?\d*)\s+(-?\d+\.?\d*)\s*\+/?-\s*(\d+\.?\d*)\s+(.*)$',
+                             str(line))
+                if m:
+                    obstime= Time( float(m.group(1)), format='decimalyear')
+
+            if m:
+                Sep = float(m.group(2))
+                eSep= float(m.group(3))
+                PA  = float(m.group(4))
+                ePA = float(m.group(5))
+                Ref = m.group(6)
+
+                print("Date: ",m.group(1),"=> Time: ",obstime.isot)
+                print("Separation: ",Sep," ± ",eSep)
+                print("Pos.Angle:  ",PA ," ± ",ePA)
+                print("Reference:  ",Ref)
+
+                datalines.append(line.encode("utf-8"))
+                this = np.array(( Ref, obstime.mjd, Sep,eSep, PA,ePA ),
+                                dtype=[("Ref",np.str,32), ("MJD",'f8'), ('Sep','f4'), ('eSep','f4'), ('PA','f4'), ("ePA",'f4')] )
+                print(this)
+
+                if cnt:
+                    obs= np.append(obs,this)
+                else:
+                    obs= this
+                cnt = cnt+1
+        # end of loop
+
+        f_in.close
+        orbf = cls(obs)
+        orbf.starname = starname
+        return orbf
+
+    #############################################################################
 
     def save_observations(self,filename):
 
@@ -65,7 +133,7 @@ class OrbitFit:
             header=hdr )
             # would be nice to have units for sep,x,y
 
-        ff.writeto(filename,clobber=True)
+        ff.writeto(filename,overwrite=True)
 
 
     def plot_orbpnt(self, iPnt, color='orange'):
