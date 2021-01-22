@@ -1,20 +1,42 @@
+#!/usr/bin/env python
 # coding=latin1
 """
 Python class for fitting Kepler orbits to astrometric data
 
-Last Change: Thu Jan  7 16:39:06 2021
+Last Change: Sun Jan 17 17:44:04 2021
 
 2021-Jan-07: added fromObslist creator that reads observations from file
+2021-Jan-15: Changed column names in save_observations()
+	     added MCFit
 """
 
-import re
 import numpy as np
 import matplotlib.pyplot as plt
+import re
+import time
+import emcee
+import corner
+
 from datetime import datetime
 from astropy.time import Time
 from astropy.io  import fits
 from KeplerOrbit import KeplerOrbit
-import time
+
+#############################################################################
+# for emcee sampler:
+
+def log_probability( el, orbf):
+    PeriMJD, period, axis, eccent, periast, node, inclin = el
+
+    # Eccentricity out of range
+    if eccent < 0 or eccent >= 1:
+        return -np.inf
+
+    orbf.orbit = KeplerOrbit( PeriMJD, period, axis, eccent, periast, node, inclin)
+    chisq = orbf.compute_chisq()
+
+    return -0.5 * chisq 	# ln(p) - why?
+
 
 #############################################################################
 
@@ -50,6 +72,7 @@ class OrbitFit:
         self.orbit= None
 
     # end of __init__
+    ############################################
 
     @classmethod
     def fromObslist(cls,fname):
@@ -120,21 +143,22 @@ class OrbitFit:
         hdr['EXTNAME'] = 'Astrometry'
 
         ff= fits.BinTableHDU.from_columns(
-            [fits.Column(name='Ref', format='16A',	array=self.Ref),
-             fits.Column(name='MJD', format='D', 	array=self.MJD),
-             fits.Column(name='Separation', format='E', array=self.Sep),
-             fits.Column(name='Sep Error',  format='E', array=self.eSep),
-             fits.Column(name='Position Angle',format='E',array=self.PA, unit='deg'),
-             fits.Column(name='PA Error',     format='E',array=self.ePA,unit='deg'),
-             fits.Column(name='x',      format='E', array=self.xobs ),
-             fits.Column(name='x error',format='E', array=self.exobs),
-             fits.Column(name='y',      format='E', array=self.yobs ),
-             fits.Column(name='y error',format='E', array=self.eyobs) ],
+            [fits.Column(name='Ref', format='16A',array=self.Ref),
+             fits.Column(name='MJD', format='D', array=self.MJD),
+             fits.Column(name='Sep', format='E', array=self.Sep),
+             fits.Column(name='eSep',format='E', array=self.eSep),
+             fits.Column(name='PA',  format='E', array=self.PA, unit='deg'),
+             fits.Column(name='ePA', format='E', array=self.ePA,unit='deg'),
+             fits.Column(name='x',  format='E', array=self.xobs ),
+             fits.Column(name='ex', format='E', array=self.exobs),
+             fits.Column(name='y',  format='E', array=self.yobs ),
+             fits.Column(name='ey', format='E', array=self.eyobs) ],
             header=hdr )
             # would be nice to have units for sep,x,y
 
         ff.writeto(filename,overwrite=True)
 
+    #######################################################
 
     def plot_orbpnt(self, iPnt, color='orange'):
         PA = self.PArad[iPnt]
@@ -154,7 +178,6 @@ class OrbitFit:
             xobs = s * np.sin(PA)
             yobs = s * np.cos(PA)
             plt.plot( [xexp,xobs], [yexp,yobs], linestyle="-", color=color)
-
 
 
     def plot_orbit(self, pnt_color='red', orb_color='blue', orb_lw=1):
@@ -188,6 +211,7 @@ class OrbitFit:
         plt.draw()
         #plt.show(block=block) # not necessary if ion() is used
 
+    ############################################
 
     def plot_chisq_matrix(self):
         fig = plt.figure(2)
@@ -197,6 +221,7 @@ class OrbitFit:
         plt.ylabel("Eccentricity")
         plt.draw()
 
+    #######################################################
 
     def compute_chisq(self):
         """compute chi-squared of current orbit"""
@@ -206,15 +231,18 @@ class OrbitFit:
         sepexp = np.sqrt(xexp*xexp + yexp*yexp)
         PA_exp = np.arctan2(xexp,yexp) * 180./np.pi
         PA_exp[ PA_exp<0 ] += 360.	# shift into range [0,360]
+        # what if PA_exp is 0.x and PA_obs is 359.y ???
 
         dr = (self.Sep-sepexp) / self.eSep
         dp = (self.PA -PA_exp) / self.ePA
 
+        dp[ dp<-180 ] += 360.
+        dp[ dp> 180 ] -= 360.
+
         chisq = np.sum( dr*dr + dp*dp )
         return chisq
 
-    # end of compute_chisq
-
+    #######################################################
 
     def print_residuals(self):
         """ print observed & expected positions and differences """
@@ -240,9 +268,37 @@ class OrbitFit:
         print("red.chi^2:", chisq / (2*Epoch.size-7))
 
 
+    ##################################################################
+
+    def solve_svd(self):
+
+        EAnom = self.orbit.compute_EAnom( self.MJD)
+
+        Amatrix= np.array( [ np.cos(EAnom) - self.orbit.Eccent,
+                             np.sqrt(1.-self.orbit.Eccent*self.orbit.Eccent) * np.sin(EAnom) ])
+	## Amatrix has shape Nobs,2
+
+        errMat = np.array( [self.exobs, self.exobs] )	# same shape as Amatrix
+        Xti = np.linalg.lstsq( np.transpose( Amatrix/errMat), self.xobs/self.exobs, rcond=None)[0]
+        self.orbit.X0, self.orbit.X1 = Xti
+
+        errMat = np.array( [self.eyobs, self.eyobs] )
+        Yti = np.linalg.lstsq( np.transpose( Amatrix/errMat), self.yobs/self.eyobs, rcond=None)[0]
+        self.orbit.Y0, self.orbit.Y1 = Yti
+
+        self.orbit.ThieleInnes_to_elements()
+        self.orbit.chisq = self.compute_chisq()
+
+        return self.orbit.chisq
+
+    ##################################################################
     # NOTE: loops stop _before_ value *_end is tried
 
-    def svdfit(self, T0_start,T0_npnt,T0_mstp, P_start,P_end,P_npnt, e_start,e_end,e_npnt,plot=True):
+    def svdfit(self,
+               T0_start, T0_npnt, T0_mstp,
+               P_start, P_end, P_npnt,
+               e_start, e_end, e_npnt,
+               plot=True):
         """ grid search in T0,p,e; SVD for Thiele-Innes """
 
         print(P_npnt," periods,",e_npnt," eccentricities")
@@ -290,23 +346,7 @@ class OrbitFit:
                     for T0 in np.arange( T0_cent-T0_hrng, T0_cent+T0_hrng, T0_step):
                         self.orbit.PeriMJD = T0
 
-                        EAnom = self.orbit.compute_EAnom( self.MJD)
-
-                        Amatrix= np.array( [ np.cos(EAnom) - self.orbit.Eccent,
-                                             np.sqrt(1.-self.orbit.Eccent*self.orbit.Eccent) * np.sin(EAnom) ])
-                        # Amatrix has shape Nobs,2
-
-                        errMat = np.array( [self.exobs, self.exobs] )	# same shape as Amatrix
-                        Xti = np.linalg.lstsq( np.transpose( Amatrix/errMat), self.xobs/self.exobs)[0]
-                        self.orbit.X0, self.orbit.X1 = Xti
-
-                        errMat = np.array( [self.eyobs, self.eyobs] )
-                        Yti = np.linalg.lstsq( np.transpose( Amatrix/errMat), self.yobs/self.eyobs)[0]
-                        self.orbit.Y0, self.orbit.Y1 = Yti
-
-                        self.orbit.ThieleInnes_to_elements()
-
-                        chisq = self.compute_chisq()
+                        chisq = self.solve_svd()
 
                         if chisq < self.matrix[iPer,iEcc].chisq:
                             self.orbit.chisq = chisq
@@ -319,7 +359,7 @@ class OrbitFit:
                                 #      T0      P       a       e       o       O       i
                                 print("Better: ",end="")
                                 self.orbit.print_me()
-                                print(" {0:>10.1f}".format(chisq))
+                                print(" chi^2 {0:10.1f}".format(chisq))
                                 chisqmin= chisq
                                 best_iPer,best_iEcc = iPer,iEcc
                                 if plot:
@@ -336,7 +376,7 @@ class OrbitFit:
 
                 if iEcc % 10 == 0:
                     self.orbit.print_me()
-                    print(" {0:>10.1f}".format(self.orbit.chisq))
+                    print(" chi^2 {0:10.1f}".format(self.orbit.chisq))
 
                 iEcc += 1
             # endfor eccent
@@ -348,7 +388,7 @@ class OrbitFit:
         self.orbit = self.matrix[best_iPer,best_iEcc]
         print("Best orbit found: ",end="")
         self.orbit.print_me()
-        print(" {0:>10.1f}".format(chisq))
+        print(" chi^2 {0:10.1f}".format(chisq))
         t= time.clock() - time0
         print("Time:",t/60.," minutes")
         plt.ioff()
@@ -416,6 +456,143 @@ class OrbitFit:
                     best_chisq= el.chisq
 
         self.chisq_matrix = data[7,...]
+
+    ##################################################################
+
+    def orbel_histograms(self, samples=None, distance=1.):
+        """
+        plot histograms of orbital elements
+        """
+
+        if not np.any(samples):
+            shape = self.matrix.shape
+            nSamp = shape[0]*shape[1]
+            samples = np.empty( (nSamp,7))
+            # 7 orbital elements
+
+            for i in range(nSamp):
+                el = (self.matrix.flatten())[i]
+
+                samples[i,0] = el.PeriMJD
+                samples[i,1] = el.Period
+                samples[i,2] = el.Axis
+                samples[i,3] = el.Eccent
+                samples[i,4] = el.Periast
+                samples[i,5] = el.Node
+                samples[i,6] = el.Inclin
+
+
+        #(fig,axs) = plt.subplots(2,4)
+        #print(axs.shape)
+        fig = plt.figure()
+        elnames = [ "T0", "Period", "Axis", "Eccentricity", "Periastron", "Line of nodes", "Inclination" ]
+        for i in range(7):
+            plt.subplot(2,4,i+1)
+            plt.hist( samples[:,i])
+            #axs[i//4, i%4].hist( samples[:,i])
+            plt.xlabel( elnames[i])
+
+        axis = samples[:,2] * distance
+        period= samples[:,1]
+        mass = axis**3 / period**2
+
+        #axs[1,3].hist(mass)
+        plt.subplot(2,4,8)
+        plt.hist(mass)
+        plt.xlabel("System mass")
+        plt.show()
+
+
+    ##################################################################
+
+    def MCfit(self, nIter=1000, save_chain=None, save_corner=None):
+
+        nWalker = 42
+        nDim = 7	# number of orbital elements
+
+        fchisq = self.chisq_matrix.flatten()
+        bestidx = (np.argsort(fchisq))[0:nWalker]	# nWalker indices for best chi-squares
+
+        best_orbits = (self.matrix.flatten())[bestidx]
+
+        startpnts = np.zeros( (nWalker, nDim) )
+
+        for i in range(nWalker):
+            startpnts[i,0] = best_orbits[i].PeriMJD
+            startpnts[i,1] = best_orbits[i].Period
+            startpnts[i,2] = best_orbits[i].Axis
+            startpnts[i,3] = best_orbits[i].Eccent
+            startpnts[i,4] = best_orbits[i].Periast
+            startpnts[i,5] = best_orbits[i].Node
+            startpnts[i,6] = best_orbits[i].Inclin
+
+        elnames = [ "T0", "Period", "Axis", "Eccent", "Periast", "Node", "Inclin" ]
+
+        for iEl in range(nDim):
+            print("Orbital element #", iEl, elnames[iEl])
+            print(startpnts[:,iEl])
+
+        sampler = emcee.EnsembleSampler( nWalker, nDim, log_probability, args=(self,))
+        self.sampler = sampler
+        sampler.run_mcmc(startpnts, nIter, progress=True);
+
+        tau = sampler.get_autocorr_time(quiet=True)
+        print("autocorrelation time:",tau)
+        burnin = int(2 * np.max(tau))
+        print("burn-in:",burnin)
+
+        samps = sampler.get_chain(discard=burnin, flat=True)
+
+        if save_chain:
+            hdu = fits.PrimaryHDU(samps)
+            hdu.writeto( save_chain, overwrite=True)
+
+        for iEl in range(nDim):
+            quant = np.percentile(samps[:,iEl], [16,50,84])
+            di = np.diff(quant)
+            print("{0:>6}: {1:8.2f} +{2:8.2f} -{3:8.2f}".format(elnames[iEl], quant[1], di[1], di[0]))
+
+        plt.plot(samps[:,1], ".")	# 1=period
+        plt.ylabel("Period [years]")
+        plt.show()
+
+        fig = plt.figure() # figsize=(10,10))
+        fig = corner.corner(samps, fig=fig, labels=elnames)
+        if save_corner:
+            plt.savefig(save_corner)
+
+        plt.show()
+
+        return(samps)	# sampler is stored in self
+
+
+    #######################################################
+
+    def cornerplot_with_mass(self, sampler, distance, save_corner=None):
+        """
+        make a corner plot of MCed orbital elements plus mass
+        distance is used to convert axis to au
+        """
+
+        elnames = [ "T0", "Period", "Axis", "Eccent", "Periast", "Node", "Inclin", "Mass" ]
+
+        tau = sampler.get_autocorr_time(quiet=True)
+        #print("autocorrelation time:",tau)
+        burnin = int(2 * np.max(tau))
+
+        samps = sampler.get_chain(discard=burnin, flat=True)
+
+        samps[:,2] *= distance	# convert axis to au
+        mass = samps[:,2]**3 / samps[:,1]**2	# M = a^3/P^2
+
+        samps = np.hstack( (samps,mass[:,np.newaxis]))
+
+        fig = plt.figure() # figsize=(10,10))
+        fig = corner.corner(samps, fig=fig, labels=elnames)
+        if save_corner:
+            plt.savefig(save_corner)
+
+        plt.show()
 
 
 #############################################################################
