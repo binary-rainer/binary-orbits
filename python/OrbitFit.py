@@ -3,7 +3,7 @@
 """
 Python class for fitting Kepler orbits to astrometric data
 
-Last Change: Sun Jan 17 17:44:04 2021
+Last Change: Sat Feb 13 14:14:53 2021
 
 2021-Jan-07: added fromObslist creator that reads observations from file
 2021-Jan-15: Changed column names in save_observations()
@@ -505,7 +505,7 @@ class OrbitFit:
 
     ##################################################################
 
-    def MCfit(self, nIter=1000, save_chain=None, save_corner=None):
+    def MCfit(self, nIter=1000, save_sampler=None, save_chain=None, save_corner=None):
 
         nWalker = 42
         nDim = 7	# number of orbital elements
@@ -532,7 +532,13 @@ class OrbitFit:
             print("Orbital element #", iEl, elnames[iEl])
             print(startpnts[:,iEl])
 
-        sampler = emcee.EnsembleSampler( nWalker, nDim, log_probability, args=(self,))
+        backend = None
+        if save_sampler:
+            backend = emcee.backends.HDFBackend(save_sampler)
+            backend.reset(nWalker, nDim)
+
+        sampler = emcee.EnsembleSampler( nWalker, nDim, log_probability,
+                                         args=(self,), backend=backend)
         self.sampler = sampler
         sampler.run_mcmc(startpnts, nIter, progress=True);
 
@@ -556,12 +562,12 @@ class OrbitFit:
         plt.ylabel("Period [years]")
         plt.show()
 
-        fig = plt.figure() # figsize=(10,10))
-        fig = corner.corner(samps, fig=fig, labels=elnames)
-        if save_corner:
-            plt.savefig(save_corner)
-
-        plt.show()
+        #fig = plt.figure() # figsize=(10,10))
+        #fig = corner.corner(samps, fig=fig, labels=elnames)
+        #if save_corner:
+        #    plt.savefig(save_corner)
+        #
+        #plt.show()
 
         return(samps)	# sampler is stored in self
 
@@ -577,7 +583,7 @@ class OrbitFit:
         elnames = [ "T0", "Period", "Axis", "Eccent", "Periast", "Node", "Inclin", "Mass" ]
 
         tau = sampler.get_autocorr_time(quiet=True)
-        #print("autocorrelation time:",tau)
+        print("autocorrelation time:",tau)
         burnin = int(2 * np.max(tau))
 
         samps = sampler.get_chain(discard=burnin, flat=True)
@@ -587,7 +593,7 @@ class OrbitFit:
 
         samps = np.hstack( (samps,mass[:,np.newaxis]))
 
-        fig = plt.figure() # figsize=(10,10))
+        fig = plt.figure(figsize=(12,12))
         fig = corner.corner(samps, fig=fig, labels=elnames)
         if save_corner:
             plt.savefig(save_corner)
