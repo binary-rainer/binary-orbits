@@ -1,7 +1,7 @@
 """
 Python-class for handling a Kepler-orbit
 
-Last Change: Wed Oct  7 09:55:45 2020
+Last Change: Sat Feb 13 18:36:48 2021
 """
 
 import numpy as np
@@ -44,11 +44,14 @@ class KeplerOrbit:
         cn = np.cos(node)
         sn = np.sin(node)
         ci = np.cos(inc)
+        si = np.sin(inc)
 
         self.X0 = self.Axis * ( cp * sn + sp * cn * ci)
         self.Y0 = self.Axis * ( cp * cn - sp * sn * ci)
         self.X1 = self.Axis * (-sp * sn + cp * cn * ci)
         self.Y1 = self.Axis * (-sp * cn - cp * sn * ci)
+        self.Z0 = self.Axis * sp * si
+        self.Z1 = self.Axis * cp * si
 
     ############################################
 
@@ -139,6 +142,23 @@ class KeplerOrbit:
         return x,y
 
     ############################################
+    # nu in degrees!
+
+    def true_anom_to_xyz(self, nu):
+        nur = nu * np.pi/180.
+
+        cnu = np.cos(nur)
+        snu = np.sin(nur)
+
+        r = self.rad_from_cnu(cnu)
+
+        x = r * (self.X0 * cnu + self.X1 * snu)
+        y = r * (self.Y0 * cnu + self.Y1 * snu)
+        z = r * (self.Z0 * cnu + self.Z1 * snu)
+
+        return x,y,z
+
+    ############################################
     # result is in the length units of the orbital elements
     # divided by period converted to seconds (e.g. mas/s)
     # based on, e.g., Hilditch p.42
@@ -156,7 +176,7 @@ class KeplerOrbit:
 
     ############################################
 
-    def MJD_to_xy(self, MJD):
+    def MJD_to_rnu(self, MJD):
         E = self.compute_EAnom(MJD)
 
         if self.Eccent < 1.:
@@ -170,6 +190,13 @@ class KeplerOrbit:
         else:
             rcnu = self.Eccent - np.cosh(E)
             rsnu = np.sqrt(self.Eccent*self.Eccent - 1.) * np.sinh(E)
+
+        return (rcnu,rsnu)
+
+    ############################################
+
+    def MJD_to_xy(self, MJD):
+        (rcnu,rsnu) = self.MJD_to_rnu(MJD)
 
         x = self.X0 * rcnu + self.X1 * rsnu
         y = self.Y0 * rcnu + self.Y1 * rsnu
@@ -179,30 +206,20 @@ class KeplerOrbit:
     ############################################
 
     def MJD_to_z(self, MJD):
-
-        E = self.compute_EAnom(MJD)
-
-        if self.Eccent < 1.:
-            rcnu = np.cos(E) - self.Eccent
-            rsnu = np.sqrt(1.-self.Eccent*self.Eccent) * np.sin(E)
-        elif self.Eccent == 1.:
-            # E is in fact true anomaly here
-            r    = 2./(1.+np.cos(E))
-            rcnu = r * np.cos(E)
-            rsnu = r * np.sin(E)
-        else:
-            rcnu = self.Eccent - np.cosh(E)
-            rsnu = np.sqrt(self.Eccent*self.Eccent - 1.) * np.sinh(E)
-
-        peri = self.Periast * np.pi/180.
-        inc  = self.Inclin  * np.pi/180.
-
-        Z0 = self.Axis * np.sin(peri) * np.sin(inc)
-        Z1 = self.Axis * np.cos(peri) * np.sin(inc)	# buf fixed 7-Oct-2020
-
-        z = Z0 * rcnu + Z1 * rsnu
-
+        (rcnu,rsnu) = self.MJD_to_rnu(MJD)
+        z = self.Z0 * rcnu + self.Z1 * rsnu
         return z
+
+    ############################################
+
+    def MJD_to_xyz(self, MJD):
+        (rcnu,rsnu) = self.MJD_to_rnu(MJD)
+
+        x = self.X0 * rcnu + self.X1 * rsnu
+        y = self.Y0 * rcnu + self.Y1 * rsnu
+        z = self.Z0 * rcnu + self.Z1 * rsnu
+
+        return x,y,z
 
     ############################################
 
