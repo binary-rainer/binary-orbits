@@ -3,13 +3,14 @@
 """
 Python class for fitting Kepler orbits to astrometric data
 
-Last Change: Sat Feb 13 14:14:53 2021
+Last Change: Wed Apr 13 23:00:55 2022
 
 2021-Jan-07: added fromObslist creator that reads observations from file
 2021-Jan-15: Changed column names in save_observations()
 	     added MCFit
 """
 
+import copy
 import numpy as np
 import matplotlib.pyplot as plt
 import re
@@ -30,6 +31,10 @@ def log_probability( el, orbf):
 
     # Eccentricity out of range
     if eccent < 0 or eccent >= 1:
+        return -np.inf
+
+    # Omega violates convention for astrometric orbits
+    if node < 0 or node > 180:
         return -np.inf
 
     orbf.orbit = KeplerOrbit( PeriMJD, period, axis, eccent, periast, node, inclin)
@@ -311,7 +316,7 @@ class OrbitFit:
         best_iPer= -1
         best_iEcc= -1
 
-        time0 = time.clock()
+        time0 = time.time()
 
         iPer = 0
         for period in np.logspace( np.log10(P_start), np.log10(P_end), P_npnt, endpoint=False):
@@ -320,9 +325,10 @@ class OrbitFit:
 
             if iPer > 0:
                 print(iPer*100/P_npnt,"% done, finish in ",end='')
-                t= (time.clock() - time0) * (P_npnt-iPer)/iPer/60
+                t= (time.time() - time0) * (P_npnt-iPer)/iPer/60
                 if t < 90: print("{0:.2f} minutes".format(t))
                 else:      print("{0:.1f} hours".format(t/60))
+                print("Global chi^2_min so far:",chisqmin)
 
             iEcc = 0
             for eccent in np.linspace(e_start,e_end,e_npnt, endpoint=False):
@@ -331,7 +337,7 @@ class OrbitFit:
                 # create a new orbit-object and put it into The Matrix
                 self.orbit = KeplerOrbit(T0_start,period,1.,eccent,0.,0.,0.)
                 self.orbit.chisq= 1e38	# add chisq-field to KeplerOrbit, set very high
-                self.matrix[iPer,iEcc] = self.orbit
+                self.matrix[iPer,iEcc] = copy.copy(self.orbit)	# should NOT be a reference
 
                 T0_cent = T0_start
                 T0_step = self.orbit.Period*365.25*10./T0_npnt	# will be set to correct step within loop
@@ -349,8 +355,8 @@ class OrbitFit:
                         chisq = self.solve_svd()
 
                         if chisq < self.matrix[iPer,iEcc].chisq:
-                            self.orbit.chisq = chisq
-                            self.matrix[iPer,iEcc] = self.orbit
+                            #self.orbit.chisq = chisq - this is already there
+                            self.matrix[iPer,iEcc] = copy.copy(self.orbit)
                             self.chisq_matrix[iPer,iEcc]= chisq
                             T0_cent= T0
 
@@ -389,7 +395,7 @@ class OrbitFit:
         print("Best orbit found: ",end="")
         self.orbit.print_me()
         print(" chi^2 {0:10.1f}".format(chisq))
-        t= time.clock() - time0
+        t= time.time() - time0
         print("Time:",t/60.," minutes")
         plt.ioff()
         return self.orbit
@@ -455,7 +461,8 @@ class OrbitFit:
                     self.orbit= el
                     best_chisq= el.chisq
 
-        self.chisq_matrix = data[7,...]
+        # Remember: indices in fits-files are inverted!
+        self.chisq_matrix = np.transpose(data[7,...])
 
     ##################################################################
 
@@ -505,32 +512,64 @@ class OrbitFit:
 
     ##################################################################
 
-    def MCfit(self, nIter=1000, save_sampler=None, save_chain=None, save_corner=None):
+    def MCfit(self, nIter=1000, nWalker=42,
+              save_sampler=None, save_chain=None, save_corner=None):
 
-        nWalker = 42
         nDim = 7	# number of orbital elements
 
-        fchisq = self.chisq_matrix.flatten()
+        print("Shape of chisq matrix:", self.chisq_matrix.shape)
+        print("Shape of elem. matrix:", self.matrix.shape)
+
+        fchisq = self.chisq_matrix.flatten(order='C')
         bestidx = (np.argsort(fchisq))[0:nWalker]	# nWalker indices for best chi-squares
 
-        best_orbits = (self.matrix.flatten())[bestidx]
+        #print("best idx:")
+        #print(bestidx)
+        #print("sorted chisq:")
+        #print(fchisq[bestidx])
+        #best_orbits = (self.matrix.flatten(order='C'))[bestidx]
+
+        #print("best orbit:")
+        #best_orbits[0].print_me()
+        #print(" ", best_orbits[0].chisq)
+        #print("from fchisq:", fchisq[bestidx[0]])
 
         startpnts = np.zeros( (nWalker, nDim) )
 
+        print("Starting orbits:")
+        print(" idx  ix  iy ____T0__ ___P__ ___a__ _e__ _omega _Omega ____i_ ______chi^2______")
         for i in range(nWalker):
-            startpnts[i,0] = best_orbits[i].PeriMJD
-            startpnts[i,1] = best_orbits[i].Period
-            startpnts[i,2] = best_orbits[i].Axis
-            startpnts[i,3] = best_orbits[i].Eccent
-            startpnts[i,4] = best_orbits[i].Periast
-            startpnts[i,5] = best_orbits[i].Node
-            startpnts[i,6] = best_orbits[i].Inclin
+            idx = bestidx[i]
+            ix,iy = np.unravel_index(idx, self.matrix.shape, order='C')
+            print("{0:4d} {1:3d} {2:3d}".format(idx,ix,iy), end=" ")
+
+            #startpnts[i,0] = best_orbits[i].PeriMJD
+            #startpnts[i,1] = best_orbits[i].Period
+            #startpnts[i,2] = best_orbits[i].Axis
+            #startpnts[i,3] = best_orbits[i].Eccent
+            #startpnts[i,4] = best_orbits[i].Periast
+            #startpnts[i,5] = best_orbits[i].Node
+            #startpnts[i,6] = best_orbits[i].Inclin
+            #best_orbits[i].print_me()
+            #print(" ",best_orbits[i].chisq)
+
+            if self.matrix[ix,iy].Periast < 0: self.matrix[ix,iy].Periast += 360
+
+            startpnts[i,0] = self.matrix[ix,iy].PeriMJD
+            startpnts[i,1] = self.matrix[ix,iy].Period
+            startpnts[i,2] = self.matrix[ix,iy].Axis
+            startpnts[i,3] = self.matrix[ix,iy].Eccent
+            startpnts[i,4] = self.matrix[ix,iy].Periast
+            startpnts[i,5] = self.matrix[ix,iy].Node
+            startpnts[i,6] = self.matrix[ix,iy].Inclin
+            self.matrix[ix,iy].print_me()
+            print(" {0:8.1f} {1:8.1f}".format(self.matrix[ix,iy].chisq, self.chisq_matrix[ix,iy]))
 
         elnames = [ "T0", "Period", "Axis", "Eccent", "Periast", "Node", "Inclin" ]
 
-        for iEl in range(nDim):
-            print("Orbital element #", iEl, elnames[iEl])
-            print(startpnts[:,iEl])
+        #for iEl in range(nDim):
+        #    print("Orbital element #", iEl, elnames[iEl])
+        #    print(startpnts[:,iEl])
 
         backend = None
         if save_sampler:
@@ -543,7 +582,7 @@ class OrbitFit:
         sampler.run_mcmc(startpnts, nIter, progress=True);
 
         tau = sampler.get_autocorr_time(quiet=True)
-        print("autocorrelation time:",tau)
+        print("autocorrelation time:",np.max(tau))
         burnin = int(2 * np.max(tau))
         print("burn-in:",burnin)
 
@@ -583,7 +622,7 @@ class OrbitFit:
         elnames = [ "T0", "Period", "Axis", "Eccent", "Periast", "Node", "Inclin", "Mass" ]
 
         tau = sampler.get_autocorr_time(quiet=True)
-        print("autocorrelation time:",tau)
+        print("autocorrelation time:",np.max(tau))
         burnin = int(2 * np.max(tau))
 
         samps = sampler.get_chain(discard=burnin, flat=True)
