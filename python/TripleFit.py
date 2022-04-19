@@ -3,7 +3,7 @@
 """
 TripleFit.py
 Created:     Sun Jan 10 18:04:00 2021 by Koehler@Rita
-Last change: Fri Jan 15 21:53:16 2021
+Last change: Fri Apr 15 12:57:27 2022
 
 Python-script to fit Tribble-Orbit
 
@@ -28,6 +28,13 @@ def read_tribble(fname_inner, fname_outer, verbose=False):
 
     (nameI,obsI) = read_obs(fname_inner, verbose=verbose)
     (nameO,obsO) = read_obs(fname_outer, verbose=verbose)
+
+    print("Inner:")
+    print(obsI)
+    print("Outer:")
+    print(obsO)
+    print("===========")
+
 
     cnt = 0
 
@@ -66,7 +73,7 @@ def read_tribble(fname_inner, fname_outer, verbose=False):
 # passing only one arg to ensembleSampler doesn't work...
 # missing: priors for orbital elements
 
-def log_probability( el, orbf, dummy):
+def log_probability( el, orbf):
     #print("Elements:",el)
     PeriMJD, period, axis, eccent, periast, node, inclin, ratio = el
 
@@ -365,6 +372,7 @@ class TripleFit:
     #######################################################
 
     def read_svdfit_result(self,filename):
+        """read result of svdfit from fits file"""
 
         data = fits.getdata(filename)
         shape= data.shape
@@ -394,7 +402,55 @@ class TripleFit:
 
     ##################################################################
 
-    def MCfit(self, nIter=1000, save_chain=None, save_corner=None):
+    def orbel_histograms(self, samples=None, distance=1.):
+        """
+        plot histograms of orbital elements
+        """
+
+        if not np.any(samples):
+            shape = self.matrix.shape
+            nSamp = shape[0]*shape[1]*shape[2]
+            samples = np.empty( (nSamp,8))
+            # 7 orbital elements + ratio
+
+            for i in range(nSamp):
+                print(i,"/",nSamp,end="\r")
+                el = (self.matrix.flatten())[i]
+
+                samples[i,0] = el.PeriMJD
+                samples[i,1] = el.Period
+                samples[i,2] = el.Axis
+                samples[i,3] = el.Eccent
+                samples[i,4] = el.Periast
+                samples[i,5] = el.Node
+                samples[i,6] = el.Inclin
+                samples[i,7] = el.ratio
+
+
+        #(fig,axs) = plt.subplots(2,4)
+        #print(axs.shape)
+        fig = plt.figure()
+        elnames = [ "T0", "Period", "Axis", "Eccentricity", "Periastron", "Line of nodes", "Inclination", "Ratio" ]
+        for i in range(8):
+            plt.subplot(2,4,i+1)
+            plt.hist( samples[:,i])
+            #axs[i//4, i%4].hist( samples[:,i])
+            plt.xlabel( elnames[i])
+
+        # axis = samples[:,2] * distance
+        # period= samples[:,1]
+        # mass = axis**3 / period**2
+        #
+        # #axs[1,3].hist(mass)
+        # plt.subplot(2,4,8)
+        # plt.hist(mass)
+        # plt.xlabel("System mass")
+        plt.show()
+
+
+    ##################################################################
+
+    def MCfit(self, nIter=1000, save_sampler=None, save_chain=None, save_corner=None):
 
         nWalker = 48
         nDim = 8	# number of elements + mass ratio
@@ -405,7 +461,6 @@ class TripleFit:
         print("shape of svd results:", svdres.shape)
 
         fchisq = self.chisq_matrix.flatten()
-
         bestidx = (np.argsort(fchisq))[0:nWalker]	# nWalker indices for best chi-squares
 
         startpnts = np.zeros( (nWalker, nDim) )
@@ -426,35 +481,46 @@ class TripleFit:
 
         print(startpnts.shape)
 
-        sampler = emcee.EnsembleSampler( nWalker, nDim, log_probability, args=(self,0))
+        backend = None
+        if save_sampler:
+            backend = emcee.backends.HDFBackend(save_sampler)
+            backend.reset(nWalker, nDim)
+
+        sampler = emcee.EnsembleSampler( nWalker, nDim, log_probability,
+                                         args=(self,), backend=backend)
+        self.sampler = sampler
         sampler.run_mcmc(startpnts, nIter, progress=True);
 
-        orbel_names = [ "T0", "period", "axis", "e", "omega", "Omega", "i", "ratio" ]
-        samps = sampler.get_chain(flat=True)
+        tau = sampler.get_autocorr_time(quiet=True)
+        print("autocorrelation time:",tau)
+        burnin = int(2 * np.max(tau))
+        print("burn-in:",burnin)
+
+        samps = sampler.get_chain(discard=burnin, flat=True)
         #print(samps.shape)
 
         if save_chain:
             hdu = fits.PrimaryHDU(samps)
             hdu.writeto( save_chain, overwrite=True)
 
-        for iEl in range(8):
+        for iEl in range(nDim):
             quant = np.percentile(samps[:,iEl], [16,50,84])
             di = np.diff(quant)
-            print("{0:>6}: {1:8.2f} +{2:8.2f} -{3:8.2f}".format(orbel_names[iEl], quant[1], di[1], di[0]))
+            print("{0:>6}: {1:8.2f} +{2:8.2f} -{3:8.2f}".format(elnames[iEl], quant[1], di[1], di[0]))
 
         print("Period:")
         plt.plot(samps[:,1], ".")	# 1=period
         plt.ylabel("Period [years]")
         plt.show()
 
-        fig = plt.figure( figsize=(12,12))
-        fig = corner.corner(samps, fig=fig, labels=orbel_names)
+        fig = plt.figure( figsize=(10,10))
+        fig = corner.corner(samps, fig=fig, labels=elnames)
         if save_corner:
             plt.savefig(save_corner)
 
         plt.show()
 
-        return(sampler)
+        return(samps)	# sampler is stored in self
 
 
 ##################################################################
