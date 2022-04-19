@@ -1,7 +1,7 @@
 """
 Python-class for handling a Kepler-orbit
 
-Last Change: Sat Feb 13 18:36:48 2021
+Last Change: Wed Apr 13 22:57:09 2022
 """
 
 import numpy as np
@@ -64,14 +64,16 @@ class KeplerOrbit:
         self.Periast= (opO + omO) * 180./2./np.pi	# omega = argument of periastron
         self.Node   = (opO - omO) * 180./2./np.pi	# Omega = P.A. of node
 
-        if self.Periast < 0.: self.Periast += 360.
-        if self.Node    < 0.: self.Node += 360.
+        # make sure node > 0, or check for node > 180 might fail
+        if self.Node < 0.: self.Node += 360.
 
         # from astrometry, we cannot distinguish the two nodes
         # Hilditch, p.52: convention demands we adopt the solution for which Omega < pi
         if self.Node >= 180.:
             self.Node -= 180.
             self.Periast -= 180.
+
+        if self.Periast < 0.: self.Periast += 360.
 
         # avoid singularity for sin(opO) = 0
         #
